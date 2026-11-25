@@ -78,6 +78,10 @@ PL0 = G0 + 0.3                          # phone lid bottom (66.3)
 PL_T = 2.3
 GROOVE_D = 1.5
 POWERBANK = (145.0, 70.0, 22.0)         # mock-up size (single slot fits ~ 150 x 82 x 37)
+# phone floor = SEPARATE printed plate (an 86 mm wide slab over the bay can't be printed without support)
+SHELF_LEDGE = 3.0                       # 45 deg ledges on the guard rib + back wall carry the plate
+SHELF_FIT = 0.3                         # clearance around the plate
+SHELF_HOLE_D = 14.0                     # finger holes to lift the plate out
 
 # ============================================================== servo (SG90)
 SV_X = -40.0                            # body centre x (ESP32 zone)
@@ -200,7 +204,6 @@ def body() -> Manifold:
     # ---- back section internals
     add.append(span(-XI - 0.5, XI + 0.5, YS - 0.5, Y_RIB + 0.01, STRIP_SHELF, STRIP_SHELF + 2))  # strip floor
     add.append(span(-XI - 0.5, XI + 0.5, Y_RIB, YP, FLOOR - 0.5, RIB_TOP))                         # guard rib
-    add.append(span(-XI - 0.5, XI + 0.5, YP - 0.5, YB + 0.5, Z_PHONE_FLOOR, Z_PHONE))              # phone floor
     for z0, z1 in ((FLOOR + 0.5, Z_PHONE_FLOOR - 0.5),):                                           # bank opening (1 slot)
         cut.append(span(-W, W, YP + 2.0, YB - 2.0, z0, z1))
     # cable channel: power bank bay -> (rib holes) -> space under the swing strip -> (divider holes) -> ESP32 / Pi
@@ -264,7 +267,28 @@ def body() -> Manifold:
     cut.append(span(XI - 1, W, PI_HDMI_Y[1] - 6.0, PI_HDMI_Y[0] + 6.0, PI_PCB_Z + 0.5, PI_PCB_Z + 9.0))  # HDMI
     for k in range(5):                                                           # right wall vents
         cut.append(box(10, 2.0, 12.0, W / 2, -90.0 + k * 4.5, 52.0))
-    return m + union(add) - union(cut)
+    return m + union(add) - union(cut) + shelf_ledges()
+
+
+def shelf_ledges() -> Manifold:
+    """45-degree ledges (no support needed) on the guard rib and back wall; the phone floor plate rests on them."""
+    L, zt = SHELF_LEDGE, Z_PHONE_FLOOR
+    out = []
+    for yw, s in ((YP, 1), (YB, -1)):                      # wall face, direction into the bay
+        y_far = yw + s * L
+        top = span(-XI - 0.5, XI + 0.5, *sorted((yw - s * 0.5, y_far)), zt - 0.6, zt)
+        foot = span(-XI - 0.5, XI + 0.5, *sorted((yw - s * 0.5, yw)), zt - L - 0.6, zt)
+        out.append((top + foot).hull())
+    return union(out)
+
+
+def phone_floor() -> Manifold:
+    """Separate floor plate of the phone compartment: drop in from the top onto the ledges."""
+    f = SHELF_FIT
+    plate = span(-XI + f, XI - f, YP + f, YB - f, Z_PHONE_FLOOR, Z_PHONE)
+    for sx in (-1, 1):
+        plate = plate - cyl_z(SHELF_HOLE_D, 10, sx * (XI - 14.0), (YP + YB) / 2, Z_PHONE_FLOOR - 1)
+    return plate
 
 
 # ============================================================== LIDS
@@ -673,7 +697,7 @@ const ZG = {"ESP32":"esp","Raspberry Pi":"pi","Power":"power","Phone":"phone"};
 function groupOf(p){
   if (p.kind==='lid' || p.kind==='cam') return 'lid';
   if (p.kind==='plid') return 'plid';
-  if (p.kind==='body') return 'body';
+  if (p.kind==='body' || p.kind==='pfloor') return 'body';
   return ZG[DATA.info[p.key].zone];
 }
 const on = id => document.getElementById('L_'+id).checked;
@@ -716,6 +740,7 @@ document.querySelectorAll('.presets button').forEach(b=>b.onclick=()=>{
 function shellInfo(p, pt){
   const R = DATA.regions, s = DATA.shell;
   if (p.kind==='plid') return s.plid;
+  if (p.kind==='pfloor') return s.pfloor;
   if (p.kind==='lid') return pt.x < R.xDiv ? s.lid_esp : s.lid_pi;
   if (pt.y > R.yDiv){
     if (pt.y < R.yRib) return pt.z < R.zStrip ? s.channel : s.swing;
@@ -751,6 +776,7 @@ addEventListener('resize',resize); resize();
 """
 
 BODY_COLOR, LID_COLOR, PLID_COLOR, CAM_COLOR = "#cdd3dc", "#f2a93b", "#9fb1e8", "#e8734a"
+PFLOOR_COLOR = "#7fc8a9"
 
 
 def b64stl(tm: trimesh.Trimesh) -> str:
@@ -761,21 +787,22 @@ def main():
     STL_DIR.mkdir(exist_ok=True)
     RENDER_DIR.mkdir(exist_ok=True)
 
-    bd, ml, pl, cm = body(), main_lid(), phone_lid(), camera_mount()
+    bd, ml, pl, cm, pf = body(), main_lid(), phone_lid(), camera_mount(), phone_floor()
     report = []
     for name, m, orient in (("smart_desk_box_body", bd, to_bed), ("smart_desk_box_lid", ml, flip_to_bed),
-                            ("phone_lid", pl, to_bed), ("camera_mount", cm, to_bed)):
+                            ("phone_lid", pl, to_bed), ("camera_mount", cm, to_bed),
+                            ("phone_floor", pf, to_bed)):
         assert m.status().name == "NoError", (name, m.status())
         tm = to_trimesh(orient(m))
         tm.export(STL_DIR / f"{name}.stl")
         report.append((name, tm.extents, tm.volume / 1000.0, tm.is_watertight))
 
-    bd_t, ml_t, pl_t, cm_t = map(to_trimesh, (bd, ml, pl, cm))
+    bd_t, ml_t, pl_t, cm_t, pf_t = map(to_trimesh, (bd, ml, pl, cm, pf))
     comps = [(k, to_trimesh(m), col) for k, m, col in components()]
     on_lid = lambda k: PART_INFO[k][3]
 
     def scene(lift=0.0, slide=0.0, with_comp=True, keep=None):
-        out = [(bd_t, BODY_COLOR), (moved(ml_t, dz=lift), LID_COLOR), (moved(cm_t, dz=lift), CAM_COLOR),
+        out = [(bd_t, BODY_COLOR), (pf_t, PFLOOR_COLOR), (moved(ml_t, dz=lift), LID_COLOR), (moved(cm_t, dz=lift), CAM_COLOR),
                (moved(pl_t, dx=slide), PLID_COLOR)]
         if with_comp:
             out += [(moved(t, dz=lift) if on_lid(k) else t, col) for k, t, col in comps if keep is None or k in keep]
@@ -787,7 +814,7 @@ def main():
            "Right side: Pi POWER hole (Pi cable out to a wall plug) + HDMI, power bank slot, phone lid exit", elev=22, azim=35)
     render(scene(), RENDER_DIR / "box_left.png",
            "Left side: ESP32-S3 USB-C x2, 5V IN (servo/fan), KY-015 vents, fan intake, power bank slot", elev=22, azim=-150)
-    inside = [(bd_t, BODY_COLOR)] + [(t, col) for k, t, col in comps if not on_lid(k) and k not in ("phone",)]
+    inside = [(bd_t, BODY_COLOR), (pf_t, PFLOOR_COLOR)] + [(t, col) for k, t, col in comps if not on_lid(k) and k not in ("phone",)]
     render(inside, RENDER_DIR / "box_inside.png",
            "Inside (lids removed)\nESP32-S3 zone | Pi 5 zone · servo through the divider · swing strip · power banks", elev=62, azim=-70)
     low = span(-W, W, -D, D, -1, Z_PHONE_FLOOR - 0.5)
@@ -796,6 +823,9 @@ def main():
     render(route, RENDER_DIR / "cable_route.png",
            "Power (box cut at z = 39.5): 1 power bank -> ESP32-S3 (orange, inside the box)\n"
            "Pi 5 power cable (red) goes out through the Pi power hole to a wall plug", elev=60, azim=-65)
+    render([(bd_t, BODY_COLOR), (moved(pf_t, dz=45), PFLOOR_COLOR)], RENDER_DIR / "phone_floor_split.png",
+           "Phone floor = separate plate (green): print flat, drop in from the top onto the 45-degree ledges\n"
+           "(rib + back wall) -> the body prints with no 86 mm bridge over the power bank bay", elev=30, azim=-150)
     render(scene(slide=150), RENDER_DIR / "phone_open.png",
            "Phone lid slid out to the right: servo arm (white) in the swing strip, phone, power banks below", elev=50, azim=-35)
 
@@ -815,6 +845,7 @@ def main():
         {"kind": "body", "color": BODY_COLOR, "stl": b64stl(bd_t)},
         {"kind": "lid", "color": LID_COLOR, "stl": b64stl(ml_t)},
         {"kind": "plid", "color": PLID_COLOR, "stl": b64stl(pl_t)},
+        {"kind": "pfloor", "color": PFLOOR_COLOR, "stl": b64stl(pf_t)},
         {"kind": "cam", "key": "cam_mount", "onLid": True, "color": CAM_COLOR, "stl": b64stl(cm_t)},
     ]
     merged = {}
@@ -840,6 +871,7 @@ def main():
         "channel": {"title": "ช่องร้อยสายไฟ (ใต้ช่องสวิง)", "desc": "สายจาก power bank ลอดรูผนังกันมือถือ (ซ้ายหรือขวา) → วิ่งใต้ช่องสวิง → ลอดรูผนังกั้นเข้าโซน ESP32", "zone": "Power"},
         "bay": {"title": "ช่องใส่ Power bank (1 ช่อง)", "desc": "ช่องเดียว สูง 37 มม. กว้าง 82 มม. ยาวตลอดกล่อง · สอดเข้าได้ทั้งซ้ายและขวา · สายไป ESP32 ลอดรูผนังกันมือถือเข้าช่องร้อยสาย", "zone": "Power"},
         "phone": {"title": "ช่องใส่มือถือ", "desc": "168 × 86 × 24 มม. · มีผนังกันไม่ให้มือถือเข้าไปในช่องสวิง servo", "zone": "Phone"},
+        "pfloor": {"title": "พื้นช่องมือถือ (ชิ้นแยก)", "desc": "พิมพ์แยกแบบแบน แล้ววางลงจากด้านบนบนบ่ารับ 45° ที่ผนังกันมือถือ + ผนังหลัง · มีรูนิ้ว 2 รูไว้ยกออกเพื่อเข้าถึงช่อง power bank", "zone": "Phone"},
         "plid": {"title": "ฝาเลื่อนช่องมือถือ", "desc": "เลื่อนออกทางขวา · มีร่องให้แขน servo ล็อก + รอยเว้าไว้ใช้นิ้วดึง", "zone": "Phone"},
         "lid_esp": {"title": "ฝา – โซน ESP32-S3", "desc": "รู MQ135 + รูระบาย, รู KY-018, ท่อนำแสง RGB LED", "zone": "ESP32"},
         "lid_pi": {"title": "ฝา – โซน Raspberry Pi 5", "desc": "โซนวางกล้อง (ร่อง + M3 + ร่องสายแพ), รูเสียง KY-006, ช่องระบายความร้อน Pi", "zone": "Raspberry Pi"},
