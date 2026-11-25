@@ -31,25 +31,25 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from manifold3d import CrossSection, JoinType, Manifold, OpType
+from manifold3d import CrossSection, FillRule, JoinType, Manifold, OpType
 
 HERE = Path(__file__).resolve().parent
 STL_DIR = HERE / "stl"
 RENDER_DIR = HERE / "renders"
 
 # ============================================================== overall layout
-W, H = 192.0, 71.0
+W, H = 202.0, 81.0                      # +10 mm each (was 192 x 71)
 WALL, FLOOR = 2.0, 2.0
 LID_T, LIP_H, LIP_T, FIT = 2.0, 4.0, 1.6, 0.2
 CORNER_R = 4.0
 SEG = 64
 XI = W / 2 - WALL                       # 94: inner half width
 
-FRONT_DEPTH = 92.0                      # electronics section (inner)
+FRONT_DEPTH = 97.0                      # electronics section (inner)  (+5)
 DIV_T = 4.0                             # divider wall (servo screws in, phone-lid groove behind)
 SWING = 15.0                            # servo swing strip (user request: +1.5 cm)
 RIB_T = 2.0                             # guard rib between swing strip and phone
-PHONE_DEPTH = 86.0                      # phone compartment / power bank bay (inner)
+PHONE_DEPTH = 91.0                      # phone compartment / power bank bay (inner)  (+5)
 BACK_T = 3.5                            # back wall (carries the phone-lid groove)
 D = WALL + FRONT_DEPTH + DIV_T + SWING + RIB_T + PHONE_DEPTH + BACK_T
 
@@ -130,14 +130,29 @@ PI_USBC_Y = PI_Y1 - 11.2
 PI_HDMI_Y = (PI_Y1 - 26.0, PI_Y1 - 39.5)
 BUZ_C, BUZ_D = (74.0, -28.0), 12.4      # KY-006 under the lid
 
-CAM_C = (55.0, -78.0)                   # camera zone on the lid
-CAM_BASE = (34.0, 30.0)
-CAM_TILT = 25.0
+CAM_C = (55.0, -78.0)                   # camera zone on the lid (pan centre)
+# 2-part adjustable camera mount: BASE (round, pans on the lid) + HOLDER (tilts on a hinge)
+CAM_BASE_D, CAM_BASE_T = 46.0, 3.0      # round base plate
+CAM_AXIS_H = 7.0                        # hinge axis height above the base plate
+CAM_TILT = 25.0                         # shown angle (adjustable ~ -10..60 deg, M3 screws = friction lock)
+CAM_PAN = 20.0                          # +/- pan range (arc slots in the lid)
 CAM_PLATE = (32.0, 3.0, 32.0)
+CAM_PLATE_UP = 3.0                      # plate bottom above the hinge axis
+CAM_KNUCKLE_D, CAM_TAB_T, CAM_EAR_T = 10.0, 3.0, 4.0
 CAM_HOLE_DX, CAM_HOLE_Z, CAM_HOLE_DZ = 10.5, 6.0, 12.5
 CAM_LENS = (10.0, 14.0)
-CAM_FIX = [(-12.0, 9.0), (12.0, 9.0)]
-CAM_RIBBON = (18.0, 3.0, 4.0)
+CAM_FIX = [(-14.0, -11.0), (14.0, -11.0)]   # M3 from under the lid into the base
+CAM_RIBBON_SLOT = (18.0, 8.0)           # ribbon slot in the base (behind the hinge)
+CAM_LID_HOLE_D = 27.0                   # round ribbon hole in the lid (allows pan)
+
+# lid-closed IR sensor (TCRT5000 module): lock the phone lid ONLY when the lid is fully closed
+IR_BOARD = (32.0, 14.0, 1.6)            # module board (sensor at the left-wall end)
+IR_SENSOR = (10.2, 5.8, 7.0)            # TCRT5000 body
+IR_GAP = 3.0                            # sensor face -> lid underside
+IR_SHELF_L = 30.0                       # shelf length along X from the left wall
+
+TEXT = "cedt#3fai"                      # engraved on the phone lid
+TEXT_H, TEXT_DEPTH = 16.0, 0.8
 
 
 # ============================================================== helpers
@@ -267,7 +282,26 @@ def body() -> Manifold:
     cut.append(span(XI - 1, W, PI_HDMI_Y[1] - 6.0, PI_HDMI_Y[0] + 6.0, PI_PCB_Z + 0.5, PI_PCB_Z + 9.0))  # HDMI
     for k in range(5):                                                           # right wall vents
         cut.append(box(10, 2.0, 12.0, W / 2, -90.0 + k * 4.5, 52.0))
-    return m + union(add) - union(cut) + shelf_ledges()
+    cut.append(span(-XI + IR_SHELF_L + 1, -XI + IR_SHELF_L + 7, YS + 3, Y_RIB - 3,
+                    STRIP_SHELF - 1, STRIP_SHELF + 3))                           # IR sensor wire hole
+    return m + union(add) - union(cut) + shelf_ledges() + ir_shelf()
+
+
+IR_SHELF_TOP = None  # set below (depends on PL0)
+
+
+def ir_shelf() -> Manifold:
+    """Shelf in the swing strip at the left wall: TCRT5000 faces UP at the phone-lid underside.
+    The lid covers the sensor only in the last ~3 mm of travel -> 'lid fully closed'."""
+    zt = ir_shelf_top()
+    top = span(-XI - 0.5, -XI + IR_SHELF_L, YS - 0.5, Y_RIB + 0.01, zt - 2.0, zt)
+    foot = span(-XI - 0.5, -XI + IR_SHELF_L, YS - 0.5, YS, zt - 2.0 - SWING, zt)   # 45 deg underside
+    shelf = (top + foot).hull()
+    return shelf - cyl_z(2.6, 10, -XI + IR_BOARD[0] / 2, (YS + Y_RIB) / 2, zt - 8)   # M3 self-tap
+
+
+def ir_shelf_top() -> float:
+    return PL0 - IR_GAP - IR_SENSOR[2] - IR_BOARD[2]
 
 
 def shelf_ledges() -> Manifold:
@@ -311,11 +345,14 @@ def main_lid() -> Manifold:
         cyl_z(6.0, 20, *LDR_C, H - 10),
         cyl_z(5.6, H, *ESP_LED, ESP_PCB_Z),                                  # light pipe bore
         span(X_DIV - 0.6, X_DIV + 0.6, -D, Y_D, H + LID_T - 0.6, H + 5),      # zone line
-        box(CAM_BASE[0] + 0.4, CAM_BASE[1] + 0.4, 1.0, cx, cy, H + LID_T - 0.6),
-        box(CAM_RIBBON[0], CAM_RIBBON[1], 20, cx, cy + CAM_RIBBON[2], H - 10),
+        cyl_z(CAM_BASE_D + 0.4, 1.0, cx, cy, H + LID_T - 0.6),             # round seat (base can pan)
+        cyl_z(CAM_LID_HOLE_D, 20, cx, cy, H - 10),                           # ribbon hole
     ]
-    for fx, fy in CAM_FIX:
-        cut.append(cyl_z(3.4, 20, cx + fx, cy + fy, H - 10))
+    for fx, fy in CAM_FIX:                                                       # arc slots = pan +/- CAM_PAN
+        r, a0 = np.hypot(fx, fy), np.arctan2(fy, fx)
+        pts = [cyl_z(3.4, 20, cx + r * np.cos(a), cy + r * np.sin(a), H - 10)
+               for a in a0 + np.deg2rad(np.linspace(-CAM_PAN, CAM_PAN, 9))]
+        cut.append(union((pts[i] + pts[i + 1]).hull() for i in range(len(pts) - 1)))
     for k in range(8):
         a = np.deg2rad(k * 45 + 22.5)
         cut.append(cyl_z(2.4, 20, MQ_C[0] + 14.5 * np.cos(a), MQ_C[1] + 14.5 * np.sin(a), H - 10))
@@ -335,32 +372,89 @@ def phone_lid() -> Manifold:
     lid = lid - cyl_z(18.0, 10, W / 2, (YP + YB) / 2, PL0 - 1)                    # finger notch
     lid = lid - span(SV_SHAFT_X - 10.0, SV_SHAFT_X + 10.0, HORN_Y - 3.5, HORN_Y + 3.5,
                      PL0 - 1, PL0 + PL_T + 1)                                    # servo lock slot
-    return lid
+    txt = text_solid(TEXT, TEXT_H, TEXT_DEPTH + 1).translate((0, (YP + YB) / 2, PL0 + PL_T - TEXT_DEPTH))
+    return lid - txt
 
 
-# ============================================================== CAMERA MOUNT
-def cam_place(m: Manifold) -> Manifold:
-    return m.rotate((-CAM_TILT, 0, 0)).translate((CAM_C[0], CAM_C[1] - CAM_BASE[1] / 2, H + LID_T - 0.6))
+def text_solid(text: str, height: float, depth: float) -> Manifold:
+    """Text as a solid (centred at x=y=0, z 0..depth), font: DejaVu Sans Bold."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+
+    tp = TextPath((0, 0), text, size=100, prop=FontProperties(family="DejaVu Sans", weight="bold"))
+    polys = [np.asarray(p, float) for p in tp.to_polygons() if len(p) > 2]
+    cs = CrossSection(polys, FillRule.EvenOdd)
+    x0, y0, x1, y1 = cs.bounds()
+    k = height / (y1 - y0)
+    cs = cs.translate((-(x0 + x1) / 2, -(y0 + y1) / 2)).scale((k, k))
+    return cs.extrude(depth)
 
 
-def camera_mount() -> Manifold:
-    bx, by = CAM_BASE
-    px, pt, ph = CAM_PLATE
-    z0 = H + LID_T - 0.6
+# ============================================================== CAMERA MOUNT (2 parts, adjustable)
+#   cam_base   : round plate on the lid + 2 hinge ears.   PAN  : loosen the 2 M3 under the lid, turn, tighten
+#   cam_holder : camera plate + 2 hinge tabs.             TILT : 2x M3x10 through the ears into the tabs
+# local holder frame: plate front face y=0 (camera looks -Y), plate y 0..3, plate bottom z=0
+CAM_Z0 = None
+
+
+def cam_z0() -> float:
+    return H + LID_T - 0.6                                  # base bottom (sits in the lid seat)
+
+
+def cam_axis():
+    return (CAM_C[0], CAM_C[1], cam_z0() + CAM_BASE_T + CAM_AXIS_H)
+
+
+def cam_place(m: Manifold, tilt: float = CAM_TILT) -> Manifold:
+    """Holder-local -> world, tilted back by `tilt` degrees around the hinge axis."""
+    pt = CAM_PLATE[1]
+    return m.translate((0, -pt / 2, CAM_PLATE_UP)).rotate((-tilt, 0, 0)).translate(cam_axis())
+
+
+def camera_base() -> Manifold:
     cx, cy = CAM_C
-    outer = (box(bx, by, 2.0, cx, cy, z0) + cam_place(box(px, pt, ph, 0, pt / 2, 0))).hull()
-    inner = (box(bx - 4, by - 4, 0.01, cx, cy + 0.5, z0 + 2.0)
-             + cam_place(box(px - 4, 0.01, ph - 4, 0, pt + 0.01, 2.0))).hull()
-    m = outer - inner + union(cyl_z(6.0, 6.0, cx + fx, cy + fy, z0) for fx, fy in CAM_FIX)
+    z0 = cam_z0()
+    ax = cam_axis()
+    m = cyl_z(CAM_BASE_D, CAM_BASE_T, cx, cy, z0)
+    x_in = CAM_PLATE[0] / 2 + 0.4                          # ears outside the holder tabs
+    for s in (-1, 1):
+        xa, xb = sorted((cx + s * x_in, cx + s * (x_in + CAM_EAR_T)))
+        foot = span(xa, xb, cy - 6.0, cy + 6.0, z0, z0 + CAM_BASE_T + 1)
+        knuckle = cyl_x(CAM_KNUCKLE_D + 1, CAM_EAR_T, (xa + xb) / 2, cy, ax[2])
+        m = m + (foot + knuckle).hull()
+    for fx, fy in CAM_FIX:                                  # bosses for the M3 screws from below
+        m = m + cyl_z(6.5, CAM_BASE_T + 4, cx + fx, cy + fy, z0)
+    cut = [cyl_x(3.4, CAM_PLATE[0] + 2 * CAM_EAR_T + 4, cx, cy, ax[2])]     # hinge screw holes
+    for fx, fy in CAM_FIX:
+        cut.append(cyl_z(2.6, CAM_BASE_T + 3.5, cx + fx, cy + fy, z0 - 0.1))
+    sx, sy = CAM_RIBBON_SLOT
+    cut.append(span(cx - sx / 2, cx + sx / 2, cy - 0.5, cy + sy, z0 - 1, z0 + CAM_BASE_T + 1))
+    return m - union(cut)
+
+
+def camera_holder_local() -> Manifold:
+    px, pt, ph = CAM_PLATE
+    m = box(px, pt, ph, 0, pt / 2, 0)
+    for s in (-1, 1):                                       # hinge tabs (flush with the plate sides)
+        xa, xb = sorted((s * (px / 2 - CAM_TAB_T), s * px / 2))
+        knuckle = cyl_x(CAM_KNUCKLE_D, CAM_TAB_T, (xa + xb) / 2, pt / 2, -CAM_PLATE_UP)
+        m = m + (knuckle + span(xa, xb, 0, pt, 0, 6.0)).hull()
     lz = CAM_HOLE_Z + CAM_HOLE_DZ / 2
-    cut = [cam_place(rbox(CAM_LENS[0], CAM_LENS[1], 10, 2.0).rotate((90, 0, 0)).translate((0, 5, lz)))]
+    cut = [rbox(CAM_LENS[0], CAM_LENS[1], 10, 2.0).rotate((90, 0, 0)).translate((0, 5, lz)),
+           cyl_x(2.7, px + 2, 0, pt / 2, -CAM_PLATE_UP)]   # M3 self-tap through both tabs
     for sx in (-1, 1):
         for dz in (0.0, CAM_HOLE_DZ):
-            cut.append(cam_place(cyl_y(2.2, 10, sx * CAM_HOLE_DX, 0, CAM_HOLE_Z + dz)))
-    for fx, fy in CAM_FIX:
-        cut.append(cyl_z(2.6, 5.0, cx + fx, cy + fy, z0 - 0.1))
-    cut.append(box(CAM_RIBBON[0], CAM_RIBBON[1], 5, cx, cy + CAM_RIBBON[2], z0 - 1))
+            cut.append(cyl_y(2.2, 10, sx * CAM_HOLE_DX, 0, CAM_HOLE_Z + dz))
     return m - union(cut)
+
+
+def camera_holder() -> Manifold:
+    return cam_place(camera_holder_local())
+
+
+def holder_to_bed(m: Manifold) -> Manifold:
+    """Print the holder lying on its side (hinge tab face down)."""
+    return to_bed(m.rotate((0, 90, 0)))
 
 
 # ============================================================== MOCK-UP COMPONENTS
@@ -381,13 +475,23 @@ PART_INFO = {
     "servo":  ("Servo SG90 (ล็อกฝามือถือ)", "ยึดกับผนังฝั่ง ESP32 แกนลอดผนังเข้าช่องสวิง 15 มม. · แขนตั้ง = ล็อก, แขนนอน = ปลดล็อก · ส้ม → GPIO9, แดง → 5V rail", "ESP32", False),
     "pi":     ("Raspberry Pi 5 (ในกล่อง 9 × 7 ซม.)", "Gateway: Mosquitto + monitor.py ตัดสินใจ OK/WARNING/NOT OK · วางในขอบล็อกบนพื้น · USB/LAN หน้า · USB-C/HDMI ด้านขวา", "Raspberry Pi", False),
     "camera": ("Pi Camera (CSI 22-pin)", "ถ่ายภาพเมื่อ NOT OK · เงยขึ้น 25° · สายแพลงร่องบนฝาไปเสียบ Pi 5", "Raspberry Pi", True),
-    "cam_mount": ("ฐานกล้อง (พิมพ์)", "วางในโซนกล้องบนฝา ยึด M3 ×2 จากใต้ฝา · กล้องยึด M2 ×4", "Raspberry Pi", True),
+    "cam_base": ("ฐานกล้อง (ชิ้นที่ 1 – หมุนซ้าย/ขวา)", "ฐานกลมวางในร่องบนฝา ยึด M3 ×2 จากใต้ฝาผ่านร่องโค้ง → คลายแล้วหมุนได้ ±20° · มีหูบานพับ 2 ข้าง", "Raspberry Pi", True),
+    "cam_holder": ("ที่จับกล้อง (ชิ้นที่ 2 – ปรับก้ม/เงย)", "ยึดกับหูบานพับด้วย M3×10 ×2 ขันแน่นเพื่อล็อกมุม · ปรับได้ประมาณ -10° ถึง 60° · กล้องยึด M2 ×4", "Raspberry Pi", True),
+    "irlid": ("IR TCRT5000 (ตรวจว่าฝามือถือปิดสนิท)", "หันขึ้นใต้ฝามือถือที่ปลายซ้าย · ฝาจะบังเซนเซอร์เฉพาะตอนปิดสนิท → ค่อยสั่ง servo ล็อก · DO → GPIO16, VCC 3V3", "ESP32", False),
     "buzzer": ("KY-006 Buzzer", "ร้องเตือนเมื่อ NOT OK · S → GPIO18 (ขา 12), - → GND", "Raspberry Pi", True),
     "pb1":    ("Power bank (1 ช่อง)", "เลี้ยง ESP32-S3 + ราง 5V servo/พัดลม เท่านั้น · สายร้อยผ่านรูซ้าย → ช่องร้อยสาย → เข้าโซน ESP32", "Power", False),
     "cable_esp": ("สายไฟ Power bank → ESP32-S3", "ออกปลายซ้ายของ power bank → รูผนังกันมือถือ (ซ้ายล่าง) → ช่องร้อยสาย → รูผนังกั้นฝั่ง ESP32 → USB-C ของ ESP32 (มีที่ว่าง 15 มม. สำหรับหัวปลั๊ก)", "Power", False),
     "cable_pi":  ("สายไฟ Raspberry Pi 5 (ออกนอกกล่อง)", "สายจากกล่อง Pi ลอดรูไฟ Pi ที่ผนังขวา → ไปเสียบปลั๊ก/adapter ข้างนอก (ไม่ใช้ power bank)", "Raspberry Pi", False),
     "phone":  ("มือถือ", "วางในช่องมือถือ เลื่อนฝาปิดจากด้านขวา", "Phone", False),
 }
+
+
+def camera_parts_local():
+    pt = CAM_PLATE[1]
+    lz = CAM_HOLE_Z + CAM_HOLE_DZ / 2
+    return [(box(25.0, 1.0, 24.0, 0, pt + 0.5, lz - 9.5), PCB_GREEN),
+            (box(8.5, 4.0, 8.5, 0, pt - 1.6, lz - 4.25), BLACK),
+            (cyl_y(6.0, 1.2, 0, 0.0, lz), "#0b2a4a")]
 
 
 def cable(points, r=2.0) -> Manifold:
@@ -457,11 +561,15 @@ def components():
         c.append(("pi", span(xc - 7.5, xc + 7.5, cy0 + 0.5, cy0 + 17.0, t, t + 16.0), SILVER))
     c.append(("pi", span(PI_X0 + 37.5, PI_X0 + 54.0, cy0 + 0.5, cy0 + 21.0, t, t + 13.5), SILVER))
     # camera on the mount
-    pt = CAM_PLATE[1]
-    lz = CAM_HOLE_Z + CAM_HOLE_DZ / 2
-    c.append(("camera", cam_place(box(25.0, 1.0, 24.0, 0, pt + 0.5, lz - 9.5)), PCB_GREEN))
-    c.append(("camera", cam_place(box(8.5, 4.0, 8.5, 0, pt - 1.6, lz - 4.25)), BLACK))
-    c.append(("camera", cam_place(cyl_y(6.0, 1.2, 0, 0.0, lz)), "#0b2a4a"))
+    for m, col in camera_parts_local():
+        c.append(("camera", cam_place(m), col))
+    # TCRT5000 lid-closed sensor on its shelf (sensor end at the left wall)
+    zt = ir_shelf_top()
+    ycen_s = (YS + Y_RIB) / 2
+    c.append(("irlid", span(-XI + 1, -XI + 1 + IR_BOARD[0], ycen_s - IR_BOARD[1] / 2, ycen_s + IR_BOARD[1] / 2,
+                            zt, zt + IR_BOARD[2]), PCB_BLUE))
+    c.append(("irlid", span(-XI + 1.5, -XI + 1.5 + IR_SENSOR[0], ycen_s - IR_SENSOR[1] / 2, ycen_s + IR_SENSOR[1] / 2,
+                            zt + IR_BOARD[2], zt + IR_BOARD[2] + IR_SENSOR[2]), BLACK))
     # KY-006
     c.append(("buzzer", cyl_z(12.0, 8.0, *BUZ_C, H - 8.0), BLACK))
     c.append(("buzzer", box(18.5, 15.0, 1.6, *BUZ_C, H - 9.6), BLACK))
@@ -777,6 +885,7 @@ addEventListener('resize',resize); resize();
 
 BODY_COLOR, LID_COLOR, PLID_COLOR, CAM_COLOR = "#cdd3dc", "#f2a93b", "#9fb1e8", "#e8734a"
 PFLOOR_COLOR = "#7fc8a9"
+CAM2_COLOR = "#b04ad8"
 
 
 def b64stl(tm: trimesh.Trimesh) -> str:
@@ -787,22 +896,23 @@ def main():
     STL_DIR.mkdir(exist_ok=True)
     RENDER_DIR.mkdir(exist_ok=True)
 
-    bd, ml, pl, cm, pf = body(), main_lid(), phone_lid(), camera_mount(), phone_floor()
+    bd, ml, pl, cb, ch, pf = body(), main_lid(), phone_lid(), camera_base(), camera_holder(), phone_floor()
     report = []
     for name, m, orient in (("smart_desk_box_body", bd, to_bed), ("smart_desk_box_lid", ml, flip_to_bed),
-                            ("phone_lid", pl, to_bed), ("camera_mount", cm, to_bed),
+                            ("phone_lid", pl, to_bed), ("camera_base", cb, to_bed),
+                            ("camera_holder", camera_holder_local(), holder_to_bed),
                             ("phone_floor", pf, to_bed)):
         assert m.status().name == "NoError", (name, m.status())
         tm = to_trimesh(orient(m))
         tm.export(STL_DIR / f"{name}.stl")
         report.append((name, tm.extents, tm.volume / 1000.0, tm.is_watertight))
 
-    bd_t, ml_t, pl_t, cm_t, pf_t = map(to_trimesh, (bd, ml, pl, cm, pf))
+    bd_t, ml_t, pl_t, cb_t, ch_t, pf_t = map(to_trimesh, (bd, ml, pl, cb, ch, pf))
     comps = [(k, to_trimesh(m), col) for k, m, col in components()]
     on_lid = lambda k: PART_INFO[k][3]
 
     def scene(lift=0.0, slide=0.0, with_comp=True, keep=None):
-        out = [(bd_t, BODY_COLOR), (pf_t, PFLOOR_COLOR), (moved(ml_t, dz=lift), LID_COLOR), (moved(cm_t, dz=lift), CAM_COLOR),
+        out = [(bd_t, BODY_COLOR), (pf_t, PFLOOR_COLOR), (moved(ml_t, dz=lift), LID_COLOR), (moved(cb_t, dz=lift), CAM_COLOR), (moved(ch_t, dz=lift), CAM2_COLOR),
                (moved(pl_t, dx=slide), PLID_COLOR)]
         if with_comp:
             out += [(moved(t, dz=lift) if on_lid(k) else t, col) for k, t, col in comps if keep is None or k in keep]
@@ -826,6 +936,19 @@ def main():
     render([(bd_t, BODY_COLOR), (moved(pf_t, dz=45), PFLOOR_COLOR)], RENDER_DIR / "phone_floor_split.png",
            "Phone floor = separate plate (green): print flat, drop in from the top onto the 45-degree ledges\n"
            "(rib + back wall) -> the body prints with no 86 mm bridge over the power bank bay", elev=30, azim=-150)
+    cam_parts = []
+    for k, (tilt, dx) in enumerate(((0.0, -60), (CAM_TILT, 0), (55.0, 60))):
+        cam_parts += [(moved(cb_t, dx=dx), CAM_COLOR), (moved(to_trimesh(cam_place(camera_holder_local(), tilt)), dx=dx), CAM2_COLOR)]
+        cam_parts += [(moved(to_trimesh(cam_place(m, tilt)), dx=dx), col) for m, col in camera_parts_local()]
+    render(cam_parts, RENDER_DIR / "camera_adjust.png",
+           "Camera mount = 2 parts: base (orange, pans +/-20 deg on the lid) + holder (purple, tilts on 2x M3)\n"
+           "shown at 0 / 25 / 55 deg tilt", elev=18, azim=-60)
+    ir_keep = span(-W, -XI + 60, YS - 1, YB, STRIP_SHELF - 2, H + 5)
+    render([(to_trimesh(bd ^ ir_keep), BODY_COLOR), (moved(to_trimesh(pl ^ ir_keep), dz=30), PLID_COLOR)]
+           + [(to_trimesh(m ^ ir_keep), col) for k, m, col in components() if k in ("irlid", "servo")],
+           RENDER_DIR / "ir_lid_sensor.png",
+           "Lid-closed IR sensor (TCRT5000) on a 45-deg shelf at the left wall, facing up at the phone lid.\n"
+           "Lid (lifted here) covers it only when fully closed -> then the servo locks", elev=50, azim=-35)
     render(scene(slide=150), RENDER_DIR / "phone_open.png",
            "Phone lid slid out to the right: servo arm (white) in the swing strip, phone, power banks below", elev=50, azim=-35)
 
@@ -846,7 +969,8 @@ def main():
         {"kind": "lid", "color": LID_COLOR, "stl": b64stl(ml_t)},
         {"kind": "plid", "color": PLID_COLOR, "stl": b64stl(pl_t)},
         {"kind": "pfloor", "color": PFLOOR_COLOR, "stl": b64stl(pf_t)},
-        {"kind": "cam", "key": "cam_mount", "onLid": True, "color": CAM_COLOR, "stl": b64stl(cm_t)},
+        {"kind": "cam", "key": "cam_base", "onLid": True, "color": CAM_COLOR, "stl": b64stl(cb_t)},
+        {"kind": "cam", "key": "cam_holder", "onLid": True, "color": CAM2_COLOR, "stl": b64stl(ch_t)},
     ]
     merged = {}
     arm_parts = []
@@ -860,7 +984,7 @@ def main():
                        "stl": b64stl(trimesh.util.concatenate(tms))})
     pieces.append({"kind": "comp", "key": "servo", "onLid": False, "color": WHITE,
                    "pivot": [SV_SHAFT_X, HORN_Y, SV_Z], "stl": b64stl(trimesh.util.concatenate(arm_parts))})
-    first_color = {"cam_mount": CAM_COLOR}
+    first_color = {"cam_base": CAM_COLOR, "cam_holder": CAM2_COLOR}
     for k, _, col in comps:
         first_color.setdefault(k, col)
     info = {k: {"title": v[0], "desc": v[1], "zone": v[2], "color": first_color[k]} for k, v in PART_INFO.items()}
@@ -869,8 +993,8 @@ def main():
         "body_pi": {"title": "ตัวกล่อง – โซน Raspberry Pi 5", "desc": "ขอบล็อกกล่อง Pi 9 × 7 ซม., ช่อง USB/LAN ด้านหน้า, ที่ว่างหัวปลั๊ก 13 มม. + รูไฟ Pi (USB-C) และ HDMI ผนังขวา", "zone": "Raspberry Pi"},
         "swing": {"title": "ช่องสวิง servo (15 มม.)", "desc": "แกน servo ลอดผนังเข้ามาตรงนี้ แขนหมุนโดยมีระยะห่างรอบตัว ≥ 5 มม.", "zone": "ESP32"},
         "channel": {"title": "ช่องร้อยสายไฟ (ใต้ช่องสวิง)", "desc": "สายจาก power bank ลอดรูผนังกันมือถือ (ซ้ายหรือขวา) → วิ่งใต้ช่องสวิง → ลอดรูผนังกั้นเข้าโซน ESP32", "zone": "Power"},
-        "bay": {"title": "ช่องใส่ Power bank (1 ช่อง)", "desc": "ช่องเดียว สูง 37 มม. กว้าง 82 มม. ยาวตลอดกล่อง · สอดเข้าได้ทั้งซ้ายและขวา · สายไป ESP32 ลอดรูผนังกันมือถือเข้าช่องร้อยสาย", "zone": "Power"},
-        "phone": {"title": "ช่องใส่มือถือ", "desc": "168 × 86 × 24 มม. · มีผนังกันไม่ให้มือถือเข้าไปในช่องสวิง servo", "zone": "Phone"},
+        "bay": {"title": "ช่องใส่ Power bank (1 ช่อง)", "desc": "ช่องเดียว สูง 37 มม. กว้าง 87 มม. ยาวตลอดกล่อง · สอดเข้าได้ทั้งซ้ายและขวา · สายไป ESP32 ลอดรูผนังกันมือถือเข้าช่องร้อยสาย", "zone": "Power"},
+        "phone": {"title": "ช่องใส่มือถือ", "desc": "198 × 91 × 34 มม. · มีผนังกันไม่ให้มือถือเข้าไปในช่องสวิง servo", "zone": "Phone"},
         "pfloor": {"title": "พื้นช่องมือถือ (ชิ้นแยก)", "desc": "พิมพ์แยกแบบแบน แล้ววางลงจากด้านบนบนบ่ารับ 45° ที่ผนังกันมือถือ + ผนังหลัง · มีรูนิ้ว 2 รูไว้ยกออกเพื่อเข้าถึงช่อง power bank", "zone": "Phone"},
         "plid": {"title": "ฝาเลื่อนช่องมือถือ", "desc": "เลื่อนออกทางขวา · มีร่องให้แขน servo ล็อก + รอยเว้าไว้ใช้นิ้วดึง", "zone": "Phone"},
         "lid_esp": {"title": "ฝา – โซน ESP32-S3", "desc": "รู MQ135 + รูระบาย, รู KY-018, ท่อนำแสง RGB LED", "zone": "ESP32"},
